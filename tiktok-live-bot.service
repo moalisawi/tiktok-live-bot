@@ -1,0 +1,14 @@
+[Unit]
+Description=TikTok live -> Telegram notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/tiktok-live-bot
+ExecStart=/opt/tiktok-live-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+TikTokLive>=7.0
+httpx>=0.28
+python-dotenv>=1.0
