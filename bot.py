@@ -69,6 +69,7 @@ class Bot:
         self.settings = {"pause": False, "end": True}
         self.message_id = None
         self._saved = None
+        self.checked_at = None
 
     # ---- Telegram ------------------------------------------------------
     async def tg(self, method, timeout=30, **params):
@@ -155,14 +156,21 @@ class Bot:
             self._saved = text
 
     # ---- screens ---------------------------------------------------------
+    def last_check_text(self):
+        if not self.checked_at:
+            return "—"
+        age = time.time() - self.checked_at
+        return "قبل ثواني" if age < 60 else f"قبل {fmt_dur(age)}"
+
     def main_screen(self):
         live = sum(v["live"] for v in self.users.values())
         status = "⏸ موقوفة" if self.settings["pause"] else "🔔 مفعّلة"
         text = (f"🎛 <b>لوحة التحكم</b>\n\n👥 الحسابات: <b>{len(self.users)}</b>\n"
-                f"🔴 لايف الآن: <b>{live}</b>\n🔔 الإشعارات: {status}")
+                f"🔴 لايف الآن: <b>{live}</b>\n🔔 الإشعارات: {status}\n"
+                f"🕒 آخر فحص: {self.last_check_text()}")
         kb = [[btn("➕ إضافة حساب", "ad"), btn("📋 حساباتي", "l")],
               [btn("🔴 مين لايف الآن", "lv"), btn("⚙️ الإعدادات", "s")],
-              [btn("❓ مساعدة", "h")]]
+              [btn("🔄 افحص الآن", "ck"), btn("❓ مساعدة", "h")]]
         return text, kb
 
     def list_screen(self):
@@ -193,9 +201,9 @@ class Bot:
     def live_screen(self):
         live = [u for u, v in self.users.items() if v["live"]]
         if not live:
-            return "🔴 <b>لايف الآن</b>\n\nما في أي حساب من حساباتك لايف حالياً.", [[btn("⬅️ رجوع", "m")]]
+            return "🔴 <b>لايف الآن</b>\n\nما في أي حساب من حساباتك لايف حالياً.", [[btn("🔄 افحص الآن", "ck"), btn("⬅️ رجوع", "m")]]
         kb = [[btn(f"▶️ @{u}", url=f"https://www.tiktok.com/@{u}/live")] for u in live]
-        kb.append([btn("⬅️ رجوع", "m")])
+        kb.append([btn("🔄 افحص الآن", "ck"), btn("⬅️ رجوع", "m")])
         return f"🔴 <b>لايف الآن ({len(live)})</b>", kb
 
     def settings_screen(self):
@@ -276,6 +284,12 @@ class Bot:
         mid, data = cb["message"]["message_id"], cb.get("data", "")
         key, _, arg = data.partition(":")
         toast = None
+        if key == "ck":
+            await self.tg("answerCallbackQuery", callback_query_id=cb["id"], text="🔄 جاري الفحص...")
+            await self.check_live()
+            on_live_screen = cb["message"].get("text", "").startswith("🔴")
+            await self.edit(mid, *(self.live_screen() if on_live_screen else self.main_screen()))
+            return
         if key == "ad":
             await self.send("➕ ابعتلي اسم الحساب أو رابطه (@username). ممكن عدة حسابات بنفس الرسالة.")
             return await self.tg("answerCallbackQuery", callback_query_id=cb["id"])
@@ -323,7 +337,9 @@ class Bot:
                 return user, None  # keep previous flag
 
         changed = False
-        for user, live in await asyncio.gather(*(one(u) for u in list(self.users))):
+        results = await asyncio.gather(*(one(u) for u in list(self.users)))
+        self.checked_at = time.time()
+        for user, live in results:
             v = self.users.get(user)
             if live is None or v is None or live == v["live"]:
                 continue
