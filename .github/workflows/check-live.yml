@@ -1,12 +1,15 @@
 name: tiktok-live-bot
 
 on:
+  # GitHub's cron is unreliable (hours of gaps), so each session re-dispatches
+  # itself when it ends. The cron below only restarts the chain if it breaks.
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write
 
 # one session at a time: two would fight over Telegram getUpdates
 concurrency:
@@ -25,8 +28,17 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Run bot session (~4.5 min)
+        id: bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TIKTOK_USERS: ${{ secrets.TIKTOK_USERS }}
         run: python bot.py --session 270
+      - name: Start the next session
+        if: always() && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # back off after a failure so a broken config cannot spin in a tight loop
+          if [ "${{ steps.bot.outcome }}" != "success" ]; then sleep 120; fi
+          gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
