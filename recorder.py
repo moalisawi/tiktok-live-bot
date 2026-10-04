@@ -121,26 +121,21 @@ async def deliver(http, notify, user, file: Path):
 async def resolve_stream(user):
     """Return the best direct stream URL for a currently-live user."""
     client = TikTokLiveClient(unique_id=f"@{user}")
-    try:
-        room_id = int(await client.web.fetch_room_id_from_api(user))
-        info = await client.web.fetch_room_info(room_id=room_id)
-        data = json.loads(info["stream_url"]["live_core_sdk_data"]["pull_data"]["stream_data"])["data"]
-        for q in QUALITIES:
-            main = (data.get(q) or {}).get("main") or {}
-            url = main.get("flv") or main.get("hls")
-            if url:
-                return url
-        raise RuntimeError("no stream url in room info")
-    finally:
-        await client.close()
+    if os.getenv("TIKTOK_SESSIONID"):  # only needed for age-restricted streams
+        client.web.set_session(os.environ["TIKTOK_SESSIONID"], os.getenv("TIKTOK_TT_TARGET_IDC"))
+    room_id = int(await client.web.fetch_room_id_from_api(user))
+    info = await client.web.fetch_room_info(room_id=room_id)
+    data = json.loads(info["stream_url"]["live_core_sdk_data"]["pull_data"]["stream_data"])["data"]
+    for q in QUALITIES:
+        main = (data.get(q) or {}).get("main") or {}
+        url = main.get("flv") or main.get("hls")
+        if url:
+            return url
+    raise RuntimeError("no stream url in room info")
 
 
 async def is_live(user):
-    client = TikTokLiveClient(unique_id=f"@{user}")
-    try:
-        return await client.is_live()
-    finally:
-        await client.close()
+    return await TikTokLiveClient(unique_id=f"@{user}").is_live()
 
 
 async def run_ffmpeg(url, path, stop: asyncio.Event):
@@ -224,6 +219,7 @@ async def read_record_list(http):
 
 async def main():
     tasks: dict[str, tuple[asyncio.Task, asyncio.Event]] = {}
+    cooldown: dict[str, float] = {}  # user -> don't retry before this time (after a crash)
     async with httpx.AsyncClient(timeout=30) as http:
         async def notify(text):
             try:
@@ -244,12 +240,16 @@ async def main():
                 if task.done():
                     if task.exception():
                         log.error("recording @%s crashed: %r", user, task.exception())
-                        await notify(f"❌ تعطل تسجيل @{user}: {task.exception()}")
+                        err = str(task.exception())
+                        hint = ("\nالبث مقيّد بالعمر: لازم TIKTOK_SESSIONID في ملف .env (شوف README)"
+                                if "Age restricted" in err else "")
+                        await notify(f"❌ تعطل تسجيل @{user}: {err[:200]}{hint}\nبعيد المحاولة بعد 10 دقائق.")
+                        cooldown[user] = time.time() + 600
                     del tasks[user]
                 elif wanted is not None and user not in wanted:
                     stop.set()  # recording switched off in the panel
             for user in (wanted or ()):
-                if user in tasks:
+                if user in tasks or time.time() < cooldown.get(user, 0):
                     continue
                 try:
                     if await is_live(user):
