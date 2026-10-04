@@ -29,6 +29,10 @@ CHAT_ID = int(os.environ["TELEGRAM_CHAT_ID"])
 REC_DIR = Path(os.getenv("REC_DIR", r"D:\تسجيلات-تيك-توك"))
 FFMPEG = os.getenv("FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
 POLL = int(os.getenv("REC_POLL_SECONDS", "30"))
+SEND = os.getenv("REC_SEND", "1") != "0"                       # upload finished recordings to Telegram
+SEND_MAX_MB = int(os.getenv("REC_SEND_MAX_MB", "1024"))        # bigger recordings are only announced
+TG_LIMIT = 49 * 1024 * 1024                                     # Bot API upload cap is 50 MB
+CHUNK_TARGET = 40 * 1024 * 1024
 QUALITIES = ("origin", "uhd", "hd", "sd", "ld")
 API = f"https://api.telegram.org/bot{TOKEN}"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0 Safari/537.36"
@@ -49,6 +53,69 @@ def fmt_size(path_list):
     if mb >= 1024:
         return f"{mb / 1024:.2f} GB"
     return f"{mb:.0f} MB" if mb >= 1 else "<1 MB"
+
+
+def ffprobe():
+    return shutil.which("ffprobe") or str(Path(FFMPEG).with_name("ffprobe.exe"))
+
+
+async def duration_of(path: Path):
+    proc = await asyncio.create_subprocess_exec(
+        ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path),
+        stdout=asyncio.subprocess.PIPE)
+    out, _ = await proc.communicate()
+    return float(out.decode().strip())
+
+
+async def split_for_telegram(path: Path):
+    """Return [path] if it fits Telegram's 50 MB cap, else cut it into smaller mp4 parts."""
+    size = path.stat().st_size
+    if size <= TG_LIMIT:
+        return [path]
+    seg = await duration_of(path) * CHUNK_TARGET / size
+    parts = []
+    for _ in range(4):  # keyframe cuts are uneven: shrink the segment length until every part fits
+        for old in path.parent.glob(f"{path.stem}_part*.mp4"):
+            old.unlink()
+        proc = await asyncio.create_subprocess_exec(
+            FFMPEG, "-y", "-loglevel", "error", "-i", str(path), "-c", "copy", "-f", "segment",
+            "-segment_time", f"{seg:.1f}", "-reset_timestamps", "1", "-movflags", "+faststart",
+            str(path.with_name(path.stem + "_part%02d.mp4")))
+        await proc.wait()
+        parts = sorted(path.parent.glob(f"{path.stem}_part*.mp4"))
+        if parts and all(p.stat().st_size <= TG_LIMIT for p in parts):
+            return parts
+        seg *= 0.7
+    return parts
+
+
+async def send_file(http, path: Path, caption):
+    for method, field in (("sendVideo", "video"), ("sendDocument", "document")):
+        with open(path, "rb") as f:
+            r = await http.post(
+                f"{API}/{method}", timeout=900,
+                data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"},
+                files={field: (path.name, f, "video/mp4")})
+        data = r.json()
+        if data.get("ok"):
+            return
+        log.warning("%s failed for %s: %s", method, path.name, data.get("description"))
+    raise RuntimeError(f"Telegram refused {path.name}: {data.get('description')}")
+
+
+async def deliver(http, notify, user, file: Path):
+    """Upload a finished recording (split into <50 MB parts when needed) and tidy up the parts."""
+    size_mb = file.stat().st_size / 1_048_576
+    if not SEND:
+        return
+    if size_mb > SEND_MAX_MB:
+        return await notify(f"📦 تسجيل @{user} كبير ({size_mb / 1024:.1f} GB) فما رفعته على تلجرام. موجود على جهازك.")
+    parts = await split_for_telegram(file)
+    for i, part in enumerate(parts, 1):
+        label = f" · جزء {i}/{len(parts)}" if len(parts) > 1 else ""
+        await send_file(http, part, f"🎥 @{user} · {file.stem[:16].replace('_', ' ')}{label}")
+        if part != file:
+            part.unlink()
 
 
 async def resolve_stream(user):
@@ -110,7 +177,7 @@ async def remux(mkv: Path):
     return mkv
 
 
-async def record_stream(user, stop, notify, resolve=resolve_stream, live_check=is_live, out_root=None):
+async def record_stream(user, stop, notify, resolve=resolve_stream, live_check=is_live, out_root=None, send=None):
     out_dir = (out_root or REC_DIR) / user
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -135,6 +202,13 @@ async def record_stream(user, stop, notify, resolve=resolve_stream, live_check=i
     if files:
         names = "\n".join(f"<code>{f}</code>" for f in files)
         await notify(f"✅ انتهى تسجيل <b>@{user}</b>\nالمدة: ~{fmt_dur(time.time() - started)} · الحجم: {fmt_size(files)}\n{names}")
+        for f in files:
+            if send:
+                try:
+                    await send(user, f)
+                except Exception as e:
+                    log.exception("upload failed")
+                    await notify(f"⚠️ ما قدرت أرفع {f.name} على تلجرام: {e}")
     else:
         await notify(f"⚠️ ما انحفظ أي ملف لتسجيل @{user}")
     return files
@@ -180,7 +254,8 @@ async def main():
                 try:
                     if await is_live(user):
                         stop = asyncio.Event()
-                        tasks[user] = (asyncio.create_task(record_stream(user, stop, notify)), stop)
+                        tasks[user] = (asyncio.create_task(record_stream(
+                            user, stop, notify, send=lambda u, f: deliver(http, notify, u, f))), stop)
                 except Exception as e:
                     log.warning("check failed for @%s: %s", user, e)
             await asyncio.sleep(POLL)
