@@ -118,10 +118,10 @@ class Bot:
 
     # ---- state in pinned message ---------------------------------------
     def new_user(self):
-        return {"live": False, "since": None, "mute": False, "last": None}
+        return {"live": False, "since": None, "mute": False, "last": None, "rec": False}
 
     def render_state(self):
-        lines = [HEADER] + [f"{'🔴' if v['live'] else '⚪'} {u}{' 🔕' if v['mute'] else ''}" for u, v in self.users.items()]
+        lines = [HEADER] + [f"{'🔴' if v['live'] else '⚪'} {u}{' 🔕' if v['mute'] else ''}{' 🎥' if v['rec'] else ''}" for u, v in self.users.items()]
         if not self.users:
             lines.append("(فاضية)")
         lines.append("DATA " + json.dumps({"u": self.users, "s": self.settings}, separators=(",", ":")))
@@ -177,7 +177,7 @@ class Bot:
         if not self.users:
             return "📋 <b>حساباتي</b>\n\nالقائمة فاضية. ابعتلي اسم حساب أو رابطه لأضيفه.", \
                    [[btn("➕ إضافة حساب", "ad")], [btn("⬅️ رجوع", "m")]]
-        kb = [[btn(f"{'🔴' if v['live'] else '⚪'} @{u}{' 🔕' if v['mute'] else ''}", f"a:{u}")] for u, v in self.users.items()]
+        kb = [[btn(f"{'🔴' if v['live'] else '⚪'} @{u}{' 🔕' if v['mute'] else ''}{' 🎥' if v['rec'] else ''}", f"a:{u}")] for u, v in self.users.items()]
         kb.append([btn("➕ إضافة حساب", "ad"), btn("⬅️ رجوع", "m")])
         return "📋 <b>حساباتي</b>\nاضغط على حساب للتحكم فيه:", kb
 
@@ -189,12 +189,14 @@ class Bot:
             state = "⚪ مش لايف"
             if v["last"]:
                 state += f"\nآخر بث ملاحَظ: قبل {fmt_dur(time.time() - v['last'])}"
-        text = f"👤 <b>@{u}</b>\n\nالحالة: {state}\nالإشعارات: {'🔕 مكتومة' if v['mute'] else '🔔 مفعّلة'}"
+        text = (f"👤 <b>@{u}</b>\n\nالحالة: {state}\nالإشعارات: {'🔕 مكتومة' if v['mute'] else '🔔 مفعّلة'}\n"
+                f"التسجيل: {'🎥 مفعّل' if v['rec'] else 'مطفي'}")
         links = [btn("🔗 الحساب", url=f"https://www.tiktok.com/@{u}")]
         if v["live"]:
             links.insert(0, btn("▶️ شاهد البث", url=f"https://www.tiktok.com/@{u}/live"))
         kb = [links,
-              [btn("🔔 تفعيل الإشعارات" if v["mute"] else "🔕 كتم الإشعارات", f"mt:{u}")],
+              [btn("🔔 تفعيل الإشعارات" if v["mute"] else "🔕 كتم الإشعارات", f"mt:{u}"),
+               btn("⏹ إيقاف التسجيل" if v["rec"] else "🎥 سجّل بثوثه", f"rc:{u}")],
               [btn("🗑 حذف", f"dl:{u}"), btn("⬅️ رجوع", "l")]]
         return text, kb
 
@@ -298,6 +300,11 @@ class Bot:
             v["mute"] = not v["mute"]
             toast = "🔕 تم الكتم" if v["mute"] else "🔔 تم تفعيل الإشعارات"
             await self.save()
+        elif key == "rc" and arg in self.users:
+            v = self.users[arg]
+            v["rec"] = not v["rec"]
+            toast = "🎥 التسجيل مفعّل (بيشتغل لما يكون جهازك شغّال)" if v["rec"] else "⏹ تم إيقاف التسجيل"
+            await self.save()
         elif key == "dy" and arg in self.users:
             del self.users[arg]
             await self.save()
@@ -310,7 +317,7 @@ class Bot:
         elif key == "se":
             self.settings["end"] = not self.settings["end"]
             await self.save()
-        if key in ("a", "mt") and arg in self.users:
+        if key in ("a", "mt", "rc") and arg in self.users:
             screen = self.account_screen(arg)
         elif key == "dl" and arg in self.users:
             screen = (f"🗑 متأكد بدك تحذف <b>@{arg}</b>؟",
